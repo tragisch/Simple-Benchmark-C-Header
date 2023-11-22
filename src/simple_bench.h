@@ -45,10 +45,7 @@ void format_duration(long long nanoseconds, char* buffer, size_t buffer_size) {
   }
 }
 
-#include <stdio.h>
-#include <sys/resource.h>
-
-// Adjust the format_memory_usage function depending on the platform
+// human readable memory format
 void format_memory_usage(long memory_usage, char* buffer, size_t buffer_size) {
   const long KB = 1024;       // Kilobytes in a Megabyte
   const long MB = 1024 * KB;  // Kilobytes in a Gigabyte
