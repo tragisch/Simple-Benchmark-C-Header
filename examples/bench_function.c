@@ -1,33 +1,29 @@
+/*
+ * Example using BENCH macro unsing simple sleep
+ */
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "simple_bench.h"
 
-// Just a function to benchmark:
-// Count the number of Tuesdays in the 21st century
-int countTuesdays() {
-  int count = 0;
-  struct tm timeinfo = {.tm_year = 100, .tm_mon = 0, .tm_mday = 1};
+void sleep_some_time(int seconds, int memory_usage) {
+  sleep(seconds);
+  // allocate 2MB of memory
 
-  time_t rawtime;
-  for (int i = 0; i < 36525; i++) {
-    rawtime = mktime(&timeinfo);
-    if (timeinfo.tm_wday == 2) {  // Tuesday is represented by 2 in tm_wday
-      count++;
-    }
-    rawtime += 86400;  // Add 24 hours in seconds
-    timeinfo = *localtime(&rawtime);
+  const int MEGABYTE = 1024 * 1024;
+  const int MAX_RANDOM_VALUE = 255;
+  char *store_some_memory = malloc((unsigned long)memory_usage * MEGABYTE);
+  // fill the memory with random data
+  for (int i = 0; i < memory_usage * MEGABYTE; i++) {
+    store_some_memory[i] = (char)(arc4random() % MAX_RANDOM_VALUE);
   }
-
-  return count;
+  // free the memory
+  free(store_some_memory);
 }
 
 int main() {
-  // Benchmark the function 15 times
-  BENCH(countTuesdays(), 15);
-
-  // Single interation benchmark
-  S_BENCH(countTuesdays());
-
+  BENCH(sleep_some_time(3, 4));
   return 0;
 }

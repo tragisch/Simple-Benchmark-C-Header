@@ -2,6 +2,7 @@
 #define SIMPLE_BENCH_H
 
 #include <stdio.h>
+#include <sys/resource.h>
 #include <time.h>
 
 #ifdef __MACH__  // For macOS, as it doesn't have clock_gettime by default
@@ -13,14 +14,11 @@
  *  some helper
  *******************************/
 
-// TODO: on windows colors are not supported:
-#define RED "\x1B[31m"
-#define GREEN "\x1B[32m"
-#define YELLOW "\x1B[33m"
+// TODO: on windows colors are not supported in terminal:
+// Define the color codes
 #define BLUE "\x1B[34m"
-#define MAGENTA "\x1B[35m"
-#define CYAN "\x1B[36m"
-#define WHITE "\x1B[97m"
+#define RED "\x1B[31m"
+#define WHITE "\x1B[37m"
 #define RESET "\x1B[0m"
 
 // human readable time format
@@ -47,57 +45,121 @@ void format_duration(long long nanoseconds, char* buffer, size_t buffer_size) {
   }
 }
 
+#include <stdio.h>
+#include <sys/resource.h>
+
+// Adjust the format_memory_usage function depending on the platform
+void format_memory_usage(long memory_usage, char* buffer, size_t buffer_size) {
+  const long KB = 1024;       // Kilobytes in a Megabyte
+  const long MB = 1024 * KB;  // Kilobytes in a Gigabyte
+
+#ifdef __linux__
+  // On Linux, ru_maxrss is in kilobytes
+  long memory_kilobytes = memory_usage;
+#else
+  // On BSD and macOS, ru_maxrss is in bytes
+  long memory_kilobytes = memory_usage / KB;
+#endif
+
+  if (memory_kilobytes < KB) {
+    snprintf(buffer, buffer_size, "%ld KB", memory_kilobytes);
+  } else if (memory_kilobytes < MB) {
+    snprintf(buffer, buffer_size, "%.2f MB", memory_kilobytes / (double)KB);
+  } else {
+    snprintf(buffer, buffer_size, "%.2f GB", memory_kilobytes / (double)MB);
+  }
+}
+
+// Function to print benchmark result
+void print_benchmark_result(const char* formatted_time, const long long memory,
+                            const char* fcall, const char* file, int line) {
+  char formatted_memory[64];
+  format_memory_usage(memory, formatted_memory, sizeof(formatted_memory));
+  printf(BLUE "ℬ|" RESET " CPU-Time: " RED "%s\t" RESET "RSS:" RED
+              " ~ %s\t" RESET "| %s in " WHITE " %s: % i\n",
+         formatted_time, formatted_memory, fcall, file, line);
+}
+
+void update_countdown(int remaining) {
+  printf("\r" BLUE "ℬ|" RESET "%i ", remaining);
+  fflush(stdout);
+}
+
+void clear_line() { printf("\r\033[K"); }
+
+long get_memory_usage() {
+  struct rusage usage;
+  getrusage(RUSAGE_SELF, &usage);
+  return usage
+      .ru_maxrss;  // Returns the maximum resident set size used (in kilobytes)
+}
+
 /*****************************
  *  BENCH MACROs
  *******************************/
 
-#define BENCH(FCALL, ITERATIONS)                                    \
-  do {                                                              \
-    double total_elapsed = 0.0;                                     \
-    char formatted_time[64];                                        \
-    for (int i = 0; i < ITERATIONS; i++) {                          \
-      double elapsed = CPUTIME(FCALL);                              \
-      printf("\r" BLUE "ℬ|" RESET "%i", ITERATIONS - i);            \
-      fflush(stdout);                                               \
-      total_elapsed += elapsed;                                     \
-    }                                                               \
-    printf("\r");                                                   \
-    format_duration(total_elapsed / ITERATIONS, formatted_time,     \
-                    sizeof(formatted_time));                        \
-    printf(BLUE "ℬ|" RESET " CPU-Time: " RED "%s\t" RESET           \
-                "Iterations: %i\t | %s in " WHITE "%s:%i\n",        \
-           formatted_time, ITERATIONS, #FCALL, __FILE__, __LINE__); \
+#define BENCH(FCALL)                                                      \
+  do {                                                                    \
+    long long elapsed, memory_used;                                       \
+    CPUTIME_RSS(FCALL, &elapsed, &memory_used);                           \
+    char formatted_time[64];                                              \
+    format_duration(elapsed, formatted_time, sizeof(formatted_time));     \
+    print_benchmark_result(formatted_time, memory_used, #FCALL, __FILE__, \
+                           __LINE__);                                     \
   } while (0)
 
-#define S_BENCH(FCALL)                                                \
-  do {                                                                \
-    double elapsed = CPUTIME(FCALL);                                  \
-    char formatted_time[64];                                          \
-    format_duration(elapsed, formatted_time, sizeof(formatted_time)); \
-    printf(BLUE "ℬ|" RESET " CPU-Time: " RED "%s\t" RESET             \
-                "Iterations: %i\t | %s in " WHITE "%s:%i\n",          \
-           formatted_time, 1, #FCALL, __FILE__, __LINE__);            \
-  } while (0)
-
-// CPUTIME macro, return time in nanoseconds to use further
+// CPUTIME macro
+// be careful that FCALL is NOT an expression.
 #define CPUTIME(FCALL)                                  \
   ({                                                    \
     struct timespec start, end;                         \
-    double elapsed;                                     \
+    long long elapsed;                                  \
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {  \
       perror("clock_gettime");                          \
-      elapsed = -1.0;                                   \
+      elapsed = -1;                                     \
     } else {                                            \
       FCALL;                                            \
       if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {  \
         perror("clock_gettime");                        \
-        elapsed = -1.0;                                 \
+        elapsed = -1;                                   \
       } else {                                          \
         elapsed = (end.tv_sec - start.tv_sec) * 1.0e9 + \
                   (end.tv_nsec - start.tv_nsec);        \
       }                                                 \
     }                                                   \
     elapsed;                                            \
+  })
+
+// CPUTIME_RSS macro
+#define CPUTIME_RSS(FCALL, TIME_PTR, RSS_PTR)             \
+  do {                                                    \
+    struct timespec start, end;                           \
+    long memory_before, memory_after;                     \
+                                                          \
+    memory_before = get_memory_usage();                   \
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {    \
+      perror("clock_gettime");                            \
+      *TIME_PTR = -1;                                     \
+    } else {                                              \
+      FCALL;                                              \
+      if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {    \
+        perror("clock_gettime");                          \
+        *TIME_PTR = -1;                                   \
+      } else {                                            \
+        *TIME_PTR = (end.tv_sec - start.tv_sec) * 1.0e9 + \
+                    (end.tv_nsec - start.tv_nsec);        \
+      }                                                   \
+    }                                                     \
+    memory_after = get_memory_usage();                    \
+    *RSS_PTR = memory_after - memory_before;              \
+  } while (0)
+
+#define MEASURE_MEMORY(FCALL)                        \
+  ({                                                 \
+    long memory_before = get_memory_usage();         \
+    FCALL;                                           \
+    long memory_after = get_memory_usage();          \
+    long memory_used = memory_after - memory_before; \
   })
 
 #endif  // SIMPLE_BENCH_H
