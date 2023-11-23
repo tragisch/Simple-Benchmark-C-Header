@@ -6,7 +6,7 @@ BENCH(FCALL)
 
 where FCALL is a function call or a code block.
 The macro will print the (CPU) time it took to execute the function call or code block.
-And it returns from "rusage" a snapshot of the current resource usage (RSS) of the function. Of course it is more a hint of the real memory comsunption of the function.
+And it returns from "rusage" a snapshot of the current resource usage (RSS) of the function. Of course it is more a hint of the real memory consumption. 
 
 It should work on Linux and MacOS.
 
@@ -15,7 +15,7 @@ It should work on Linux and MacOS.
 ```c
 int main() {
 
-  BENCH(countTuesdays(3,4));
+  BENCH(sleep_some_time(3,4));
 
   return 0;
 }

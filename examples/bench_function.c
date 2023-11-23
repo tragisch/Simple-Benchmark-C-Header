@@ -1,5 +1,5 @@
 /*
- * Example using BENCH macro unsing simple sleep
+ * Example using BENCH macro: simple sleep function and memory allocation
  */
 #include <stdio.h>
 #include <stdlib.h>
