@@ -22,7 +22,8 @@
 #define RESET "\x1B[0m"
 
 // human readable time format
-void format_duration(long long nanoseconds, char* buffer, size_t buffer_size) {
+static inline void format_duration(long long nanoseconds, char* buffer,
+                                   size_t buffer_size) {
   const long long nanos_per_second = 1000000000LL;
   const long long nanos_per_millisecond = 1000000LL;
   const long long nanos_per_microsecond = 1000LL;
@@ -46,7 +47,8 @@ void format_duration(long long nanoseconds, char* buffer, size_t buffer_size) {
 }
 
 // human readable memory format
-void format_memory_usage(long memory_usage, char* buffer, size_t buffer_size) {
+static inline void format_memory_usage(long memory_usage, char* buffer,
+                                       size_t buffer_size) {
   const long KB = 1024;       // Kilobytes in a Megabyte
   const long MB = 1024 * KB;  // Kilobytes in a Gigabyte
 
@@ -68,8 +70,10 @@ void format_memory_usage(long memory_usage, char* buffer, size_t buffer_size) {
 }
 
 // Function to print benchmark result
-void print_benchmark_result(const char* formatted_time, const long long memory,
-                            const char* fcall, const char* file, int line) {
+static inline void print_benchmark_result(const char* formatted_time,
+                                          const long long memory,
+                                          const char* fcall, const char* file,
+                                          int line) {
   char formatted_memory[64];
   format_memory_usage(memory, formatted_memory, sizeof(formatted_memory));
   printf(BLUE "ℬ|" RESET " CPU-Time: " RED "%s\t" RESET "RSS:" RED
@@ -77,14 +81,14 @@ void print_benchmark_result(const char* formatted_time, const long long memory,
          formatted_time, formatted_memory, fcall, file, line);
 }
 
-void update_countdown(int remaining) {
+static inline void update_countdown(int remaining) {
   printf("\r" BLUE "ℬ|" RESET "%i ", remaining);
   fflush(stdout);
 }
 
-void clear_line() { printf("\r\033[K"); }
+static inline void clear_line() { printf("\r\033[K"); }
 
-long get_memory_usage() {
+static inline long get_memory_usage() {
   struct rusage usage;
   getrusage(RUSAGE_SELF, &usage);
   return usage

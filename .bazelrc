@@ -1,0 +1,37 @@
+###############################
+# Directory structure         #
+###############################
+
+# Artifacts are typically placed in a directory called "dist"
+# Be aware that this setup will still create a bazel-out symlink in
+# your project directory, which you must exclude from version control and your
+# editor's search path.
+
+# build --symlink_prefix=dist/
+
+###############################
+# Output                      #
+###############################
+
+# A more useful default output mode for bazel query, which
+# prints "ng_module rule //foo:bar" instead of just "//foo:bar".
+query --output=label_kind
+
+###############################
+# Build                    #
+###############################
+
+# ld: warning: -undefined dynamic_lookup may not work with chained fixups
+# temporary solution: https://github.com/bazelbuild/bazel/issues/16413
+build --linkopt=-Wl,-no_fixup_chains
+
+###############################
+# Test                  #
+###############################
+
+# tests takes too long having a warning
+test --test_verbose_timeout_warnings
+
+# By default, failing tests don't print any output, it's logged to a
+# file instead.
+test --test_output=errors
