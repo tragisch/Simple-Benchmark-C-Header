@@ -11,7 +11,7 @@ And it returns from "rusage" a snapshot of the current resource usage (RSS) of t
 It should work on Linux and MacOS.
 
 ## Usage
-
+see example folder:
 ```c
 int main() {
 
