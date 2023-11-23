@@ -1,4 +1,4 @@
-# Simple Bench
+# Simple Benchmark C-Header
 An C-header only library for a simple benchmark of a function or code_block.
 One macros is (currently) provided:
 
