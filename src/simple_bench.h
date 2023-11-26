@@ -14,7 +14,6 @@
  *  some helper
  *******************************/
 
-// TODO: on windows colors are not supported in terminal:
 // Define the color codes
 #define BLUE "\x1B[34m"
 #define RED "\x1B[31m"
@@ -95,6 +94,24 @@ static inline long get_memory_usage() {
       .ru_maxrss;  // Returns the maximum resident set size used (in kilobytes)
 }
 
+// write double date to file in a table woth row "name" and colum format
+static inline void write_double_to_file(char* filename,
+                                        const char* function_name,
+                                        const char* time_usage,
+                                        const char* memory_usage) {
+  FILE* file = NULL;
+  file = fopen(filename, "a");
+  if (file == NULL) {
+    printf("Error opening file!\n");
+    exit(1);
+  }
+  time_t tm = 0;
+  time(&tm);
+  fprintf(file, "%s\t%s\t%s\t%s\n", function_name, time_usage, memory_usage,
+          ctime(&tm));
+  fclose(file);
+}
+
 /*****************************
  *  BENCH MACROs
  *******************************/
@@ -155,7 +172,7 @@ static inline long get_memory_usage() {
     *RSS_PTR = memory_after - memory_before;              \
   } while (0)
 
-#define MEASURE_MEMORY(FCALL)                        \
+#define RSS(FCALL)                                   \
   ({                                                 \
     long memory_before = get_memory_usage();         \
     FCALL;                                           \
