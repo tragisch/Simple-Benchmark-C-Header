@@ -3,5 +3,4 @@ cc_library(
     hdrs = ["simple_bench.h"],
     includes = ["."],
     visibility = ["//visibility:public"],
-    deps = ["@dbg-macro"],
 )
