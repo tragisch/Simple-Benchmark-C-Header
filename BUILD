@@ -7,12 +7,3 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# example:
-cc_binary(
-    name = "bench_1",
-    srcs = ["examples/bench_function.c"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//:bench",
-    ],
-)
