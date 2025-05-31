@@ -4,3 +4,61 @@
 #
 # For more details, please check https://github.com/bazelbuild/bazel/issues/18958
 ###############################################################################
+
+"""
+This module file is used to manage external dependencies using Bzlmod.
+Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
+For more details, please check https://github.com/bazelbuild/bazel/issues/18958
+"""
+
+###############################################################################
+# Bazel now uses Bzlmod by default to manage external dependencies.
+# Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
+#
+# For more details, please check https://github.com/bazelbuild/bazel/issues/18958
+###############################################################################
+
+module(
+    name = "simple_benchmark",
+    version = "0.1.1",
+)
+
+bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "zlib", version = "1.3.1.bcr.4")
+bazel_dep(name = "apple_support", version = "1.22.0")
+bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "cgrindel_bazel_starlib", version = "0.25.0")
+bazel_dep(name = "rules_shell", version = "0.4.0")
+bazel_dep(name = "rules_java", version = "8.11.0")
+bazel_dep(name = "google_benchmark", version = "1.9.2")
+
+bazel_dep(name = "depend_on_what_you_use", version = "0.8.0")
+
+#############################
+# Check license of external dependencies
+#############################
+
+bazel_dep(name = "phst_license_test", version = "0", dev_dependency = True)
+git_override(
+    module_name = "phst_license_test",
+    commit = "f135357cffb46e2b1120623e15eec7c88e7f34d4",
+    remote = "https://github.com/phst/license_test.git",
+)
+
+#############################
+# Load external non-Bazel libraries
+#############################
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# unity - A simple unit testing library for C.
+http_archive(
+    name = "Unity",
+    build_file = "@//:third_party/Unity.BUILD",
+    sha256 = "4598298723ecca1f242b8c540a253ae4ab591f6810cbde72f128961007683034",
+    strip_prefix = "Unity-2.5.2",
+    urls = [
+        "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.5.2.zip",
+    ],
+)
