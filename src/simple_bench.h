@@ -2,8 +2,13 @@
 #define SIMPLE_BENCH_H
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <sys/utsname.h>  
+#include <string.h>
+#include <unistd.h>
+
 
 #ifdef __MACH__  // For macOS, as it doesn't have clock_gettime by default
 #include <mach/clock.h>
@@ -102,14 +107,53 @@ static inline void write_double_to_file(char* filename,
   FILE* file = NULL;
   file = fopen(filename, "a");
   if (file == NULL) {
-    printf("Error opening file!\n");
+    perror("fopen");
     exit(1);
   }
+
+  struct utsname sysinfo;
+  if (uname(&sysinfo) != 0) {
+    strcpy(sysinfo.sysname, "UnknownOS");
+  }
+
   time_t tm = 0;
   time(&tm);
-  fprintf(file, "%s\t%s\t%s\t%s\n", function_name, time_usage, memory_usage,
-          ctime(&tm));
+  // Funktion | Zeit | Speicher | Zeitstempel | OS
+  fprintf(file, "%s\t%s\t%s\t%s\t%s\n",
+          function_name,
+          time_usage,
+          memory_usage,
+          ctime(&tm),
+          sysinfo.sysname);
   fclose(file);
+}
+
+static inline void print_environment_info(void) {
+  struct utsname sysinfo;
+  if (uname(&sysinfo) == 0) {
+    printf("\r" BLUE "ℬ|" RESET " OS: %s %s (%s)", sysinfo.sysname,
+           sysinfo.release, sysinfo.machine);
+  }
+
+  long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+  if (nprocs > 0) {
+    printf(" | Cores: %ld", nprocs);
+  }
+
+  long pages = sysconf(_SC_PHYS_PAGES);
+  long page_size = sysconf(_SC_PAGE_SIZE);
+  if (pages > 0 && page_size > 0) {
+    double mem_gb = (pages * page_size) / (1024.0 * 1024.0 * 1024.0);
+    printf(" | RAM: %.2f GB", mem_gb);
+  }
+
+  double loadavg[3];
+  if (getloadavg(loadavg, 3) == 3) {
+    printf(" | Load: %.2f / %.2f / %.2f", loadavg[0], loadavg[1], loadavg[2]);
+  }
+
+  printf("\n");
+  fflush(stdout);
 }
 
 /*****************************
