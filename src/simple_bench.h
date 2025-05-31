@@ -103,7 +103,8 @@ static inline long get_memory_usage() {
 static inline void write_double_to_file(char* filename,
                                         const char* function_name,
                                         const char* time_usage,
-                                        const char* memory_usage) {
+                                        const char* memory_usage,
+                                        const char* comment) {
   FILE* file = NULL;
   file = fopen(filename, "a");
   if (file == NULL) {
@@ -116,15 +117,22 @@ static inline void write_double_to_file(char* filename,
     strcpy(sysinfo.sysname, "UnknownOS");
   }
 
+  char hostname[256];
+  if (gethostname(hostname, sizeof(hostname)) != 0) {
+    strcpy(hostname, "UnknownHost");
+  }
+
   time_t tm = 0;
   time(&tm);
   // Funktion | Zeit | Speicher | Zeitstempel | OS
-  fprintf(file, "%s\t%s\t%s\t%s\t%s\n",
+  fprintf(file, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
           function_name,
           time_usage,
           memory_usage,
-          ctime(&tm),
-          sysinfo.sysname);
+          comment,
+          sysinfo.sysname,
+          hostname,  
+          ctime(&tm));
   fclose(file);
 }
 
