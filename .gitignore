@@ -96,7 +96,6 @@ MODULE.bazel.lock
 #-------------------------------------------------------------------------------
 # Project-specific files and folders
 #-------------------------------------------------------------------------------
-/examples/*
 /coverage/*
 /data/*
 /share/*
@@ -107,4 +106,3 @@ MODULE.bazel.lock
 StyleGuide.md
 _archive/*
 MODULE.bazel.lock
-
