@@ -1,6 +1,29 @@
 #ifndef SIMPLE_BENCH_H
 #define SIMPLE_BENCH_H
 
+// simple_bench — header-only micro-benchmark helpers.
+//
+// Threading notes:
+//   - All measurement macros use RUSAGE_SELF, which aggregates user/system
+//     CPU time across all threads of the process. When benchmarking a
+//     multi-threaded FCALL, user_time_ns/system_time_ns therefore represent
+//     the *sum* over threads, not per-thread cost.
+//   - print_*/write_* helpers are NOT thread-safe; only call from a single
+//     thread at a time, or guard with your own mutex.
+//   - simple_bench_set_stream() / simple_bench_use_color() use process-wide
+//     state.
+//
+// Memory notes:
+//   - peak_rss_delta is derived from getrusage(ru_maxrss), which is a
+//     high-water mark. The value reflects the *growth* in process peak RSS
+//     during the call; it is an approximation, not exact per-call allocation
+//     accounting.
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,18 +34,140 @@
 #include <time.h>
 #include <unistd.h>
 
-// Define the color codes
-#define BLUE "\x1B[34m"
-#define RED "\x1B[31m"
-#define WHITE "\x1B[37m"
-#define RESET "\x1B[0m"
+// Raw ANSI color escape sequences. Use simple_bench_color() to obtain the
+// proper code (or an empty string when colors are disabled).
+#define SB_ANSI_BLUE  "\x1B[34m"
+#define SB_ANSI_RED   "\x1B[31m"
+#define SB_ANSI_WHITE "\x1B[37m"
+#define SB_ANSI_RESET "\x1B[0m"
+
+// Backwards compatible aliases (always raw codes; older code may depend on
+// them being string literals).
+#define BLUE  SB_ANSI_BLUE
+#define RED   SB_ANSI_RED
+#define WHITE SB_ANSI_WHITE
+#define RESET SB_ANSI_RESET
+
+typedef enum simple_bench_color_id {
+  SB_COLOR_RESET = 0,
+  SB_COLOR_BLUE,
+  SB_COLOR_RED,
+  SB_COLOR_WHITE
+} simple_bench_color_id;
+
+// Pluggable output stream for human-readable BENCH/BENCH_VERBOSE/BENCH_N
+// output. Defaults to stdout when NULL. Use simple_bench_set_stream(stderr)
+// to keep program output separate from benchmark diagnostics.
+static inline FILE** simple_bench_stream_slot(void) {
+  static FILE* sb_stream = NULL;
+  return &sb_stream;
+}
+
+static inline FILE* simple_bench_stream(void) {
+  FILE* s = *simple_bench_stream_slot();
+  return s != NULL ? s : stdout;
+}
+
+static inline void simple_bench_set_stream(FILE* stream) {
+  *simple_bench_stream_slot() = stream;
+}
+
+// Returns 1 if ANSI colors should be emitted on the active output stream,
+// 0 otherwise. Honors the NO_COLOR convention (https://no-color.org) and
+// falls back to isatty() so redirected output stays clean.
+static inline int simple_bench_use_color(void) {
+  const char* no_color = getenv("NO_COLOR");
+  if (no_color != NULL && no_color[0] != '\0') {
+    return 0;
+  }
+  FILE* s = simple_bench_stream();
+  int fd = fileno(s);
+  return (fd >= 0 && isatty(fd)) ? 1 : 0;
+}
+
+static inline const char* simple_bench_color(simple_bench_color_id id) {
+  if (!simple_bench_use_color()) {
+    return "";
+  }
+  switch (id) {
+    case SB_COLOR_BLUE:  return SB_ANSI_BLUE;
+    case SB_COLOR_RED:   return SB_ANSI_RED;
+    case SB_COLOR_WHITE: return SB_ANSI_WHITE;
+    case SB_COLOR_RESET:
+    default:             return SB_ANSI_RESET;
+  }
+}
+
+// Optimizer barrier: prevents the compiler from eliding a value that is the
+// result of work we want to measure. Use as
+//   int result = compute();
+//   SB_DO_NOT_OPTIMIZE(result);
+// inside the FCALL block when benchmarking small pure functions.
+#if defined(__GNUC__) || defined(__clang__)
+#define SB_DO_NOT_OPTIMIZE(x) \
+  __asm__ __volatile__("" : : "g"(x) : "memory")
+#define SB_CLOBBER_MEMORY() \
+  __asm__ __volatile__("" : : : "memory")
+#else
+#define SB_DO_NOT_OPTIMIZE(x) ((void)(x))
+#define SB_CLOBBER_MEMORY()   ((void)0)
+#endif
 
 typedef struct simple_bench_measurement {
   long long wall_time_ns;
   long long user_time_ns;
   long long system_time_ns;
+  // Difference between getrusage(ru_maxrss) before and after the call.
+  // NOTE: ru_maxrss is a high-water mark, so this is the *growth* of the
+  // process peak RSS caused by the call, not its per-call allocation. The
+  // value can be 0 (no new peak) or negative on some platforms due to OS
+  // accounting; treat it as an indicator, not a precise measurement.
   long peak_rss_delta;
 } simple_bench_measurement;
+
+typedef struct simple_bench_stats {
+  int runs;
+  int warmup;
+  long long min_ns;
+  long long max_ns;
+  long long median_ns;
+  long long p90_ns;
+  long long p99_ns;
+  double mean_ns;
+} simple_bench_stats;
+
+static inline int simple_bench_cmp_ll(const void* a, const void* b) {
+  long long lhs = *(const long long*)a;
+  long long rhs = *(const long long*)b;
+  return (lhs > rhs) - (lhs < rhs);
+}
+
+// Compute stats from an unsorted samples buffer of length n (n > 0).
+// The buffer is sorted in-place.
+static inline void simple_bench_compute_stats(long long* samples, int n,
+                                              int warmup,
+                                              simple_bench_stats* out) {
+  qsort(samples, (size_t)n, sizeof(long long), simple_bench_cmp_ll);
+  out->runs = n;
+  out->warmup = warmup;
+  out->min_ns = samples[0];
+  out->max_ns = samples[n - 1];
+  out->median_ns = samples[n / 2];
+  // Nearest-rank percentile: index = ceil(p/100 * n) - 1, clamped.
+  int idx90 = (90 * n + 99) / 100 - 1;
+  int idx99 = (99 * n + 99) / 100 - 1;
+  if (idx90 < 0) idx90 = 0;
+  if (idx99 < 0) idx99 = 0;
+  if (idx90 >= n) idx90 = n - 1;
+  if (idx99 >= n) idx99 = n - 1;
+  out->p90_ns = samples[idx90];
+  out->p99_ns = samples[idx99];
+  double sum = 0.0;
+  for (int i = 0; i < n; ++i) {
+    sum += (double)samples[i];
+  }
+  out->mean_ns = sum / (double)n;
+}
 
 // Human readable time format
 static inline void format_duration(long long nanoseconds, char* buffer,
@@ -93,8 +238,9 @@ static inline void print_benchmark_result_brief(
                   sizeof(formatted_wall));
   format_memory_usage(measurement->peak_rss_delta, formatted_memory,
                       sizeof(formatted_memory));
-  printf("B| %s | wall=%s | peak-rss-delta=%s\n", fcall, formatted_wall,
-         formatted_memory);
+  fprintf(simple_bench_stream(),
+          "B| %s | wall=%s | peak-rss-delta=%s\n", fcall, formatted_wall,
+          formatted_memory);
 }
 
 static inline void print_benchmark_result_verbose(
@@ -112,25 +258,55 @@ static inline void print_benchmark_result_verbose(
                   sizeof(formatted_system));
   format_memory_usage(measurement->peak_rss_delta, formatted_memory,
                       sizeof(formatted_memory));
-  printf(BLUE "ℬ|" RESET " Wall-Time: " RED "%s\t" RESET "User: " RED "%s\t"
-              RESET "System: " RED "%s\t" RESET "Peak-RSS-Delta: " RED "%s\t"
-              RESET "| %s in " WHITE "%s:%i\n",
-         formatted_wall, formatted_user, formatted_system, formatted_memory,
-         fcall, file, line);
+  const char* c_blue = simple_bench_color(SB_COLOR_BLUE);
+  const char* c_red = simple_bench_color(SB_COLOR_RED);
+  const char* c_white = simple_bench_color(SB_COLOR_WHITE);
+  const char* c_reset = simple_bench_color(SB_COLOR_RESET);
+  const char* rss_hint =
+      measurement->peak_rss_delta <= 0 ? " (no new peak)" : "";
+  fprintf(simple_bench_stream(),
+          "%sℬ|%s Wall-Time: %s%s\t%sUser: %s%s\t%sSystem: %s%s\t%s"
+          "Peak-RSS-Delta: %s%s%s\t%s| %s in %s%s:%i%s\n",
+          c_blue, c_reset, c_red, formatted_wall, c_reset, c_red,
+          formatted_user, c_reset, c_red, formatted_system, c_reset, c_red,
+          formatted_memory, rss_hint, c_reset, fcall, c_white, file, line,
+          c_reset);
 }
 
-static inline void print_benchmark_stats_summary(const char* fcall, int runs,
-                                                 int warmup, long long min_ns,
-                                                 long long max_ns,
-                                                 long long mean_ns) {
-  char min_buf[64];
-  char max_buf[64];
-  char mean_buf[64];
-  format_duration(min_ns, min_buf, sizeof(min_buf));
-  format_duration(max_ns, max_buf, sizeof(max_buf));
-  format_duration(mean_ns, mean_buf, sizeof(mean_buf));
-  printf("B| %s | n=%d warmup=%d | wall[min/mean/max]=%s / %s / %s\n", fcall,
-         runs, warmup, min_buf, mean_buf, max_buf);
+static inline void print_benchmark_stats_summary(const char* fcall,
+                                                 const simple_bench_stats* s) {
+  char min_buf[64], median_buf[64], mean_buf[64], p90_buf[64], p99_buf[64],
+      max_buf[64];
+  format_duration(s->min_ns, min_buf, sizeof(min_buf));
+  format_duration(s->median_ns, median_buf, sizeof(median_buf));
+  format_duration((long long)s->mean_ns, mean_buf, sizeof(mean_buf));
+  format_duration(s->p90_ns, p90_buf, sizeof(p90_buf));
+  format_duration(s->p99_ns, p99_buf, sizeof(p99_buf));
+  format_duration(s->max_ns, max_buf, sizeof(max_buf));
+  fprintf(simple_bench_stream(),
+          "B| %s | n=%d warmup=%d | wall min/median/mean/p90/p99/max = "
+          "%s / %s / %s / %s / %s / %s\n",
+          fcall, s->runs, s->warmup, min_buf, median_buf, mean_buf, p90_buf,
+          p99_buf, max_buf);
+}
+
+static inline void print_benchmark_auto_summary(const char* fcall,
+                                                long long iters_per_batch,
+                                                int batches,
+                                                const simple_bench_stats* s) {
+  char min_buf[64], median_buf[64], mean_buf[64], p90_buf[64], p99_buf[64],
+      max_buf[64];
+  format_duration(s->min_ns, min_buf, sizeof(min_buf));
+  format_duration(s->median_ns, median_buf, sizeof(median_buf));
+  format_duration((long long)s->mean_ns, mean_buf, sizeof(mean_buf));
+  format_duration(s->p90_ns, p90_buf, sizeof(p90_buf));
+  format_duration(s->p99_ns, p99_buf, sizeof(p99_buf));
+  format_duration(s->max_ns, max_buf, sizeof(max_buf));
+  fprintf(simple_bench_stream(),
+          "B| %s | iters=%lld batches=%d | per-iter "
+          "min/median/mean/p90/p99/max = %s / %s / %s / %s / %s / %s\n",
+          fcall, iters_per_batch, batches, min_buf, median_buf, mean_buf,
+          p90_buf, p99_buf, max_buf);
 }
 
 static inline void write_csv_escaped(FILE* file, const char* value) {
@@ -146,49 +322,41 @@ static inline void write_csv_escaped(FILE* file, const char* value) {
   fputc('"', file);
 }
 
-static inline void write_benchmark_csv_row(const char* filename,
-                                           const char* function_name,
-                                           const char* file_name, int line,
-                                           const char* comment,
-                                           const simple_bench_measurement* m) {
-  FILE* file = fopen(filename, "a+");
-  if (file == NULL) {
-    perror("fopen");
-    exit(1);
-  }
-
+// Writes the CSV header line if needed. file must be opened with mode "a+"
+// or similar and seekable. Returns 0 on success, -1 on failure.
+static inline int simple_bench_csv_write_header_if_empty(FILE* file) {
   if (fseek(file, 0, SEEK_END) != 0) {
-    perror("fseek");
-    fclose(file);
-    exit(1);
+    fprintf(stderr, "simple_bench: fseek failed: %s\n", strerror(errno));
+    return -1;
   }
   long file_size = ftell(file);
   if (file_size < 0) {
-    perror("ftell");
-    fclose(file);
-    exit(1);
+    fprintf(stderr, "simple_bench: ftell failed: %s\n", strerror(errno));
+    return -1;
   }
   if (file_size == 0) {
     fprintf(file,
             "function,wall_time_ns,user_time_ns,system_time_ns,peak_rss_delta,"
             "file,line,timestamp,comment\n");
   }
+  return 0;
+}
 
+// Appends a single CSV row to an already-opened file handle. Cheap enough to
+// be called inside hot loops because it does no fopen/fseek work.
+static inline void simple_bench_csv_append_row(FILE* file,
+                                               const char* function_name,
+                                               const char* file_name, int line,
+                                               const char* comment,
+                                               const simple_bench_measurement* m) {
   time_t now = time(NULL);
   struct tm local_time_value;
   struct tm* local_time = localtime_r(&now, &local_time_value);
-  if (local_time == NULL) {
-    perror("localtime_r");
-    fclose(file);
-    exit(1);
-  }
-
   char timestamp[32];
-  if (strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", local_time) ==
-      0) {
-    perror("strftime");
-    fclose(file);
-    exit(1);
+  if (local_time == NULL ||
+      strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S",
+               local_time) == 0) {
+    snprintf(timestamp, sizeof(timestamp), "unknown");
   }
 
   write_csv_escaped(file, function_name);
@@ -200,87 +368,84 @@ static inline void write_benchmark_csv_row(const char* filename,
   fprintf(file, ",");
   write_csv_escaped(file, comment);
   fprintf(file, "\n");
-
-  fclose(file);
 }
 
-// Kept for backward compatibility with older TSV-based workflows.
-static inline void write_double_to_file(char* filename,
-                                        const char* function_name,
-                                        const char* time_usage,
-                                        const char* memory_usage,
-                                        const char* comment) {
-  FILE* file = NULL;
-  file = fopen(filename, "a");
+// Returns 0 on success, -1 on failure. Failures are reported to stderr but
+// never abort the program (header-only libraries should not call exit()).
+// NOTE: opens, seeks and closes the file on every call. For loops, prefer
+// BENCH_CSV_N or the simple_bench_csv_* helpers with a single open handle.
+static inline int write_benchmark_csv_row(const char* filename,
+                                          const char* function_name,
+                                          const char* file_name, int line,
+                                          const char* comment,
+                                          const simple_bench_measurement* m) {
+  FILE* file = fopen(filename, "a+");
   if (file == NULL) {
-    perror("fopen");
-    exit(1);
+    fprintf(stderr, "simple_bench: fopen(%s) failed: %s\n", filename,
+            strerror(errno));
+    return -1;
   }
-
-  struct utsname sysinfo;
-  if (uname(&sysinfo) != 0) {
-    strcpy(sysinfo.sysname, "UnknownOS");
+  if (simple_bench_csv_write_header_if_empty(file) != 0) {
+    fclose(file);
+    return -1;
   }
-
-  char hostname[256];
-  if (gethostname(hostname, sizeof(hostname)) != 0) {
-    strcpy(hostname, "UnknownHost");
-  }
-
-  time_t tm = 0;
-  time(&tm);
-  fprintf(file, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", function_name, time_usage,
-          memory_usage, comment, sysinfo.sysname, hostname, ctime(&tm));
+  simple_bench_csv_append_row(file, function_name, file_name, line, comment, m);
   fclose(file);
+  return 0;
 }
 
 static inline void print_environment_info(void) {
+  FILE* out = simple_bench_stream();
+  const char* c_blue = simple_bench_color(SB_COLOR_BLUE);
+  const char* c_reset = simple_bench_color(SB_COLOR_RESET);
   struct utsname sysinfo;
   if (uname(&sysinfo) == 0) {
-    printf("\r" BLUE "ℬ|" RESET " OS: %s %s (%s)", sysinfo.sysname,
-           sysinfo.release, sysinfo.machine);
+    fprintf(out, "\r%sℬ|%s OS: %s %s (%s)", c_blue, c_reset, sysinfo.sysname,
+            sysinfo.release, sysinfo.machine);
   }
 
   long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
   if (nprocs > 0) {
-    printf(" | Cores: %ld", nprocs);
+    fprintf(out, " | Cores: %ld", nprocs);
   }
 
   long pages = sysconf(_SC_PHYS_PAGES);
   long page_size = sysconf(_SC_PAGE_SIZE);
   if (pages > 0 && page_size > 0) {
     double mem_gb = (pages * page_size) / (1024.0 * 1024.0 * 1024.0);
-    printf(" | RAM: %.2f GB", mem_gb);
+    fprintf(out, " | RAM: %.2f GB", mem_gb);
   }
 
   double loadavg[3];
   if (getloadavg(loadavg, 3) == 3) {
-    printf(" | Load: %.2f / %.2f / %.2f", loadavg[0], loadavg[1], loadavg[2]);
+    fprintf(out, " | Load: %.2f / %.2f / %.2f", loadavg[0], loadavg[1],
+            loadavg[2]);
   }
 
-  printf("\n");
-  fflush(stdout);
+  fputc('\n', out);
+  fflush(out);
 }
 
 // CPUTIME macro (returns wall-clock elapsed nanoseconds for FCALL).
 #define CPUTIME(FCALL)                                                       \
   __extension__({                                                            \
-    struct timespec start, end;                                              \
-    long long elapsed;                                                       \
-    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {                       \
+    struct timespec sb_cputime_start, sb_cputime_end;                        \
+    long long sb_cputime_elapsed;                                            \
+    if (clock_gettime(CLOCK_MONOTONIC, &sb_cputime_start) != 0) {            \
       perror("clock_gettime");                                               \
-      elapsed = -1;                                                          \
+      sb_cputime_elapsed = -1;                                               \
     } else {                                                                 \
       FCALL;                                                                 \
-      if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {                       \
+      if (clock_gettime(CLOCK_MONOTONIC, &sb_cputime_end) != 0) {            \
         perror("clock_gettime");                                             \
-        elapsed = -1;                                                        \
+        sb_cputime_elapsed = -1;                                             \
       } else {                                                               \
-        elapsed = (end.tv_sec - start.tv_sec) * 1000000000LL +               \
-                  (end.tv_nsec - start.tv_nsec);                             \
+        sb_cputime_elapsed =                                                 \
+            (sb_cputime_end.tv_sec - sb_cputime_start.tv_sec) * 1000000000LL + \
+            (sb_cputime_end.tv_nsec - sb_cputime_start.tv_nsec);             \
       }                                                                      \
     }                                                                        \
-    elapsed;                                                                 \
+    sb_cputime_elapsed;                                                      \
   })
 
 #define CPUTIME_RSS(FCALL, TIME_PTR, RSS_PTR)                                \
@@ -336,11 +501,11 @@ static inline void print_environment_info(void) {
 
 #define RSS(FCALL)                                                            \
   __extension__({                                                            \
-    long memory_before = get_memory_usage();                                 \
+    long sb_rss_before = get_memory_usage();                                 \
     FCALL;                                                                   \
-    long memory_after = get_memory_usage();                                  \
-    long memory_used = memory_after - memory_before;                         \
-    memory_used;                                                             \
+    long sb_rss_after = get_memory_usage();                                  \
+    long sb_rss_used = sb_rss_after - sb_rss_before;                         \
+    sb_rss_used;                                                             \
   })
 
 #define BENCH(FCALL)                                                          \
@@ -359,7 +524,7 @@ static inline void print_environment_info(void) {
     print_benchmark_result_verbose(&sb_result, #FCALL, __FILE__, __LINE__);  \
   } while (0)
 
-#define BENCH_N(FCALL, RUNS, WARMUP)                                          \
+#define BENCH_N(FCALL, RUNS, WARMUP)                                         \
   do {                                                                       \
     int sb_runs = (RUNS);                                                    \
     int sb_warmup = (WARMUP);                                                \
@@ -374,24 +539,24 @@ static inline void print_environment_info(void) {
     for (int sb_i = 0; sb_i < sb_warmup; ++sb_i) {                           \
       FCALL;                                                                 \
     }                                                                        \
-    long long sb_min = LLONG_MAX;                                            \
-    long long sb_max = LLONG_MIN;                                            \
-    long long sb_sum = 0;                                                    \
+    long long* sb_samples =                                                  \
+        (long long*)malloc((size_t)sb_runs * sizeof(long long));             \
+    if (sb_samples == NULL) {                                                \
+      fprintf(stderr, "BENCH_N: malloc failed for %d samples\n", sb_runs);   \
+      break;                                                                 \
+    }                                                                        \
     for (int sb_i = 0; sb_i < sb_runs; ++sb_i) {                             \
       simple_bench_measurement sb_result;                                    \
       CPUTIME_RSS_USR_SYS(FCALL, &sb_result.wall_time_ns,                    \
-                          &sb_result.peak_rss_delta, &sb_result.user_time_ns, \
+                          &sb_result.peak_rss_delta,                         \
+                          &sb_result.user_time_ns,                           \
                           &sb_result.system_time_ns);                        \
-      if (sb_result.wall_time_ns < sb_min) {                                 \
-        sb_min = sb_result.wall_time_ns;                                     \
-      }                                                                      \
-      if (sb_result.wall_time_ns > sb_max) {                                 \
-        sb_max = sb_result.wall_time_ns;                                     \
-      }                                                                      \
-      sb_sum += sb_result.wall_time_ns;                                      \
+      sb_samples[sb_i] = sb_result.wall_time_ns;                             \
     }                                                                        \
-    print_benchmark_stats_summary(#FCALL, sb_runs, sb_warmup, sb_min, sb_max, \
-                                  sb_sum / sb_runs);                         \
+    simple_bench_stats sb_stats;                                             \
+    simple_bench_compute_stats(sb_samples, sb_runs, sb_warmup, &sb_stats);   \
+    print_benchmark_stats_summary(#FCALL, &sb_stats);                        \
+    free(sb_samples);                                                        \
   } while (0)
 
 #define BENCH_CSV(FCALL, FILE_NAME, COMMENT)                                  \
@@ -402,5 +567,121 @@ static inline void print_environment_info(void) {
     write_benchmark_csv_row((FILE_NAME), #FCALL, __FILE__, __LINE__,         \
                             (COMMENT), &sb_result);                          \
   } while (0)
+
+// Batched CSV variant: opens FILE_NAME exactly once, runs FCALL RUNS times
+// (plus WARMUP discarded warmup iterations), appends one row per run and
+// closes the file. Much cheaper than calling BENCH_CSV in a loop because it
+// avoids fopen/fseek/fclose overhead between samples.
+#define BENCH_CSV_N(FCALL, FILE_NAME, COMMENT, RUNS, WARMUP)                 \
+  do {                                                                       \
+    int sb_runs = (RUNS);                                                    \
+    int sb_warmup = (WARMUP);                                                \
+    if (sb_runs <= 0) {                                                      \
+      fprintf(stderr, "BENCH_CSV_N: RUNS must be > 0\n");                    \
+      break;                                                                 \
+    }                                                                        \
+    if (sb_warmup < 0) {                                                     \
+      fprintf(stderr, "BENCH_CSV_N: WARMUP must be >= 0\n");                 \
+      break;                                                                 \
+    }                                                                        \
+    FILE* sb_csv = fopen((FILE_NAME), "a+");                                 \
+    if (sb_csv == NULL) {                                                    \
+      fprintf(stderr, "BENCH_CSV_N: fopen(%s) failed: %s\n", (FILE_NAME),    \
+              strerror(errno));                                              \
+      break;                                                                 \
+    }                                                                        \
+    if (simple_bench_csv_write_header_if_empty(sb_csv) != 0) {               \
+      fclose(sb_csv);                                                        \
+      break;                                                                 \
+    }                                                                        \
+    for (int sb_i = 0; sb_i < sb_warmup; ++sb_i) {                           \
+      FCALL;                                                                 \
+    }                                                                        \
+    for (int sb_i = 0; sb_i < sb_runs; ++sb_i) {                             \
+      simple_bench_measurement sb_result;                                    \
+      CPUTIME_RSS_USR_SYS(FCALL, &sb_result.wall_time_ns,                    \
+                          &sb_result.peak_rss_delta,                         \
+                          &sb_result.user_time_ns,                           \
+                          &sb_result.system_time_ns);                        \
+      simple_bench_csv_append_row(sb_csv, #FCALL, __FILE__, __LINE__,        \
+                                  (COMMENT), &sb_result);                    \
+    }                                                                        \
+    fclose(sb_csv);                                                          \
+  } while (0)
+
+// Auto-calibrating benchmark. Repeatedly doubles the inner iteration count
+// until a single batch runs at least MIN_TOTAL_NS nanoseconds, then collects
+// BATCHES additional batches at that iteration count and reports the
+// distribution of per-iteration wall time. Useful when FCALL is too fast to
+// time meaningfully on its own (a few ns).
+//
+// Args:
+//   FCALL         : statement or expression to benchmark.
+//   MIN_TOTAL_NS  : minimum wall time per batch (e.g. 100000000 = 100 ms).
+//   BATCHES       : how many timed batches to collect after calibration
+//                   (must be > 0). 5 is a sensible default.
+//
+// Safety: caps the iteration count at 1<<30 to avoid runaway loops if FCALL
+// is somehow elided to zero cost by the optimizer. Use SB_DO_NOT_OPTIMIZE
+// inside FCALL to prevent that.
+#define BENCH_AUTO(FCALL, MIN_TOTAL_NS, BATCHES)                             \
+  do {                                                                       \
+    long long sb_min_total = (long long)(MIN_TOTAL_NS);                      \
+    int sb_batches = (BATCHES);                                              \
+    if (sb_min_total <= 0) {                                                 \
+      fprintf(stderr, "BENCH_AUTO: MIN_TOTAL_NS must be > 0\n");             \
+      break;                                                                 \
+    }                                                                        \
+    if (sb_batches <= 0) {                                                   \
+      fprintf(stderr, "BENCH_AUTO: BATCHES must be > 0\n");                  \
+      break;                                                                 \
+    }                                                                        \
+    /* one warmup call */                                                    \
+    FCALL;                                                                   \
+    long long sb_iters = 1;                                                  \
+    long long sb_batch_ns = 0;                                               \
+    const long long sb_iters_cap = (long long)1 << 30;                       \
+    for (;;) {                                                               \
+      struct timespec sb_ts_start, sb_ts_end;                                \
+      clock_gettime(CLOCK_MONOTONIC, &sb_ts_start);                          \
+      for (long long sb_k = 0; sb_k < sb_iters; ++sb_k) {                    \
+        FCALL;                                                               \
+      }                                                                      \
+      clock_gettime(CLOCK_MONOTONIC, &sb_ts_end);                            \
+      sb_batch_ns = (sb_ts_end.tv_sec - sb_ts_start.tv_sec) * 1000000000LL + \
+                    (sb_ts_end.tv_nsec - sb_ts_start.tv_nsec);               \
+      if (sb_batch_ns >= sb_min_total || sb_iters >= sb_iters_cap) {         \
+        break;                                                               \
+      }                                                                      \
+      sb_iters *= 2;                                                         \
+    }                                                                        \
+    long long* sb_samples =                                                  \
+        (long long*)malloc((size_t)sb_batches * sizeof(long long));          \
+    if (sb_samples == NULL) {                                                \
+      fprintf(stderr, "BENCH_AUTO: malloc failed for %d batches\n",          \
+              sb_batches);                                                   \
+      break;                                                                 \
+    }                                                                        \
+    for (int sb_b = 0; sb_b < sb_batches; ++sb_b) {                          \
+      struct timespec sb_ts_start, sb_ts_end;                                \
+      clock_gettime(CLOCK_MONOTONIC, &sb_ts_start);                          \
+      for (long long sb_k = 0; sb_k < sb_iters; ++sb_k) {                    \
+        FCALL;                                                               \
+      }                                                                      \
+      clock_gettime(CLOCK_MONOTONIC, &sb_ts_end);                            \
+      long long sb_total =                                                   \
+          (sb_ts_end.tv_sec - sb_ts_start.tv_sec) * 1000000000LL +           \
+          (sb_ts_end.tv_nsec - sb_ts_start.tv_nsec);                         \
+      sb_samples[sb_b] = sb_total / sb_iters;                                \
+    }                                                                        \
+    simple_bench_stats sb_stats;                                             \
+    simple_bench_compute_stats(sb_samples, sb_batches, 1, &sb_stats);        \
+    print_benchmark_auto_summary(#FCALL, sb_iters, sb_batches, &sb_stats);   \
+    free(sb_samples);                                                        \
+  } while (0)
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
 
 #endif  // SIMPLE_BENCH_H

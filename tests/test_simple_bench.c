@@ -131,3 +131,112 @@ void test_bench_csv_creates_header(void) {
 
   remove(filename);
 }
+
+void test_simple_bench_use_color_respects_no_color(void) {
+  setenv("NO_COLOR", "1", 1);
+  TEST_ASSERT_EQUAL_INT(0, simple_bench_use_color());
+  TEST_ASSERT_EQUAL_STRING("", simple_bench_color(SB_COLOR_RED));
+  unsetenv("NO_COLOR");
+}
+
+void test_simple_bench_compute_stats_percentiles(void) {
+  // 10 samples (after warmup), unsorted on purpose.
+  long long samples[10] = {50, 10, 30, 20, 40, 60, 80, 70, 90, 100};
+  simple_bench_stats s;
+  simple_bench_compute_stats(samples, 10, 0, &s);
+  TEST_ASSERT_EQUAL_INT(10, s.runs);
+  TEST_ASSERT_EQUAL_INT64(10, s.min_ns);
+  TEST_ASSERT_EQUAL_INT64(100, s.max_ns);
+  // nearest-rank: median at index 5 (sorted) = 60
+  TEST_ASSERT_EQUAL_INT64(60, s.median_ns);
+  // p90 -> index ceil(0.9*10)-1 = 8 -> 90
+  TEST_ASSERT_EQUAL_INT64(90, s.p90_ns);
+  // p99 -> index 9 -> 100
+  TEST_ASSERT_EQUAL_INT64(100, s.p99_ns);
+  TEST_ASSERT_TRUE(s.mean_ns > 54.9 && s.mean_ns < 55.1);
+}
+
+void test_bench_n_runs_without_crashing(void) {
+  // Smoke test: should not abort / leak should be released by free().
+  BENCH_N(noop_work(), 5, 1);
+}
+
+void test_do_not_optimize_compiles_and_runs(void) {
+  int value = 0;
+  for (int i = 0; i < 100; ++i) {
+    value += i;
+    SB_DO_NOT_OPTIMIZE(value);
+  }
+  SB_CLOBBER_MEMORY();
+  TEST_ASSERT_EQUAL_INT(4950, value);
+}
+
+void test_simple_bench_set_stream_redirects_output(void) {
+  char filename[] = "/tmp/simple_bench_stream_XXXXXX";
+  int fd = mkstemp(filename);
+  TEST_ASSERT_TRUE(fd >= 0);
+  FILE* tmp = fdopen(fd, "w+");
+  TEST_ASSERT_NOT_NULL(tmp);
+
+  simple_bench_set_stream(tmp);
+  BENCH(noop_work());
+  simple_bench_set_stream(NULL);  // reset to stdout default
+  fflush(tmp);
+
+  rewind(tmp);
+  char line[512] = {0};
+  char* got = fgets(line, sizeof(line), tmp);
+  fclose(tmp);
+  remove(filename);
+
+  TEST_ASSERT_NOT_NULL(got);
+  TEST_ASSERT_NOT_NULL(strstr(line, "wall="));
+}
+
+void test_bench_csv_n_writes_multiple_rows(void) {
+  char filename[] = "/tmp/simple_bench_csvn_XXXXXX";
+  int fd = mkstemp(filename);
+  TEST_ASSERT_TRUE(fd >= 0);
+  close(fd);
+  remove(filename);
+
+  BENCH_CSV_N(noop_work(), filename, "batch", 4, 1);
+
+  FILE* file = fopen(filename, "r");
+  TEST_ASSERT_NOT_NULL(file);
+  int line_count = 0;
+  char buf[512];
+  while (fgets(buf, sizeof(buf), file) != NULL) {
+    ++line_count;
+  }
+  fclose(file);
+  remove(filename);
+  // 1 header + 4 sample rows
+  TEST_ASSERT_EQUAL_INT(5, line_count);
+}
+
+void test_bench_auto_runs_and_reports(void) {
+  // Redirect output to a temp file so we can assert on the report.
+  char filename[] = "/tmp/simple_bench_auto_XXXXXX";
+  int fd = mkstemp(filename);
+  TEST_ASSERT_TRUE(fd >= 0);
+  FILE* tmp = fdopen(fd, "w+");
+  TEST_ASSERT_NOT_NULL(tmp);
+
+  simple_bench_set_stream(tmp);
+  // 1ms minimum batch, 3 batches — keeps the test fast.
+  BENCH_AUTO(noop_work(), 1000000, 3);
+  simple_bench_set_stream(NULL);
+  fflush(tmp);
+
+  rewind(tmp);
+  char line[512] = {0};
+  char* got = fgets(line, sizeof(line), tmp);
+  fclose(tmp);
+  remove(filename);
+
+  TEST_ASSERT_NOT_NULL(got);
+  TEST_ASSERT_NOT_NULL(strstr(line, "iters="));
+  TEST_ASSERT_NOT_NULL(strstr(line, "batches=3"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "per-iter"));
+}
