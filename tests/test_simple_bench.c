@@ -240,3 +240,98 @@ void test_bench_auto_runs_and_reports(void) {
   TEST_ASSERT_NOT_NULL(strstr(line, "batches=3"));
   TEST_ASSERT_NOT_NULL(strstr(line, "per-iter"));
 }
+
+void test_bench_raw_populates_measurement(void) {
+  simple_bench_measurement m = {
+      .wall_time_ns = -1,
+      .user_time_ns = -1,
+      .system_time_ns = -1,
+      .peak_rss_delta = -1,
+  };
+
+  BENCH_RAW(noop_work(), &m);
+
+  TEST_ASSERT_TRUE(m.wall_time_ns >= 0);
+  TEST_ASSERT_TRUE(m.user_time_ns >= 0);
+  TEST_ASSERT_TRUE(m.system_time_ns >= 0);
+  TEST_ASSERT_TRUE(m.peak_rss_delta >= 0);
+}
+
+void test_bench_raw_wall_populates_output(void) {
+  long long wall_ns = -1;
+
+  BENCH_RAW_WALL(noop_work(), &wall_ns);
+
+  TEST_ASSERT_TRUE(wall_ns >= 0);
+}
+
+void test_bench_compare_runs_and_reports(void) {
+  char filename[] = "/tmp/simple_bench_compare_XXXXXX";
+  int fd = mkstemp(filename);
+  TEST_ASSERT_TRUE(fd >= 0);
+  FILE* tmp = fdopen(fd, "w+");
+  TEST_ASSERT_NOT_NULL(tmp);
+
+  simple_bench_set_stream(tmp);
+  BENCH_COMPARE("A", noop_work(), "B", noop_work(), 4, 1);
+  simple_bench_set_stream(NULL);
+  fflush(tmp);
+
+  rewind(tmp);
+  char line[1024] = {0};
+  char* got = fgets(line, sizeof(line), tmp);
+  fclose(tmp);
+  remove(filename);
+
+  TEST_ASSERT_NOT_NULL(got);
+  TEST_ASSERT_NOT_NULL(strstr(line, "compare(A vs B)"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "faster="));
+  TEST_ASSERT_NOT_NULL(strstr(line, "x)"));
+}
+
+void test_bench_throughput_runs_and_reports(void) {
+  char filename[] = "/tmp/simple_bench_throughput_XXXXXX";
+  int fd = mkstemp(filename);
+  TEST_ASSERT_TRUE(fd >= 0);
+  FILE* tmp = fdopen(fd, "w+");
+  TEST_ASSERT_NOT_NULL(tmp);
+
+  simple_bench_set_stream(tmp);
+  BENCH_THROUGHPUT(noop_work(), 1000, "ops", 4, 1);
+  simple_bench_set_stream(NULL);
+  fflush(tmp);
+
+  rewind(tmp);
+  char line[1024] = {0};
+  char* got = fgets(line, sizeof(line), tmp);
+  fclose(tmp);
+  remove(filename);
+
+  TEST_ASSERT_NOT_NULL(got);
+  TEST_ASSERT_NOT_NULL(strstr(line, "throughput"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "ops/s"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "work=1000.000 ops"));
+}
+
+void test_bench_json_writes_jsonl_row(void) {
+  char filename[] = "/tmp/simple_bench_json_XXXXXX";
+  int fd = mkstemp(filename);
+  TEST_ASSERT_TRUE(fd >= 0);
+  close(fd);
+  remove(filename);
+
+  BENCH_JSON(noop_work(), filename, "unit \"json\" test");
+
+  FILE* file = fopen(filename, "r");
+  TEST_ASSERT_NOT_NULL(file);
+  char line[1024] = {0};
+  char* got = fgets(line, sizeof(line), file);
+  fclose(file);
+  remove(filename);
+
+  TEST_ASSERT_NOT_NULL(got);
+  TEST_ASSERT_NOT_NULL(strstr(line, "\"function\":"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "\"wall_time_ns\":"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "\"timestamp\":"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "unit \\\"json\\\" test"));
+}

@@ -309,6 +309,52 @@ static inline void print_benchmark_auto_summary(const char* fcall,
           p90_buf, p99_buf, max_buf);
 }
 
+static inline void print_benchmark_compare_summary(
+    const char* name_a, const simple_bench_stats* stats_a, const char* name_b,
+    const simple_bench_stats* stats_b, int warmup) {
+  char a_med[64], b_med[64], a_mean[64], b_mean[64];
+  format_duration(stats_a->median_ns, a_med, sizeof(a_med));
+  format_duration(stats_b->median_ns, b_med, sizeof(b_med));
+  format_duration((long long)stats_a->mean_ns, a_mean, sizeof(a_mean));
+  format_duration((long long)stats_b->mean_ns, b_mean, sizeof(b_mean));
+
+  double med_a = (double)stats_a->median_ns;
+  double med_b = (double)stats_b->median_ns;
+  const char* faster = med_a <= med_b ? name_a : name_b;
+  double faster_ns = med_a <= med_b ? med_a : med_b;
+  double slower_ns = med_a <= med_b ? med_b : med_a;
+  double speedup = (faster_ns > 0.0) ? (slower_ns / faster_ns) : 0.0;
+
+  fprintf(simple_bench_stream(),
+          "B| compare(%s vs %s) | n=%d warmup=%d | median: %s=%s, %s=%s | "
+          "mean: %s=%s, %s=%s | faster=%s (%.2fx)\n",
+          name_a, name_b, stats_a->runs, warmup, name_a, a_med, name_b, b_med,
+          name_a, a_mean, name_b, b_mean, faster, speedup);
+}
+
+static inline void print_benchmark_throughput_summary(
+    const char* fcall, const simple_bench_stats* stats, double work_units,
+    const char* unit_label) {
+  char med_buf[64], mean_buf[64];
+  format_duration(stats->median_ns, med_buf, sizeof(med_buf));
+  format_duration((long long)stats->mean_ns, mean_buf, sizeof(mean_buf));
+
+  const char* label = (unit_label != NULL && unit_label[0] != '\0')
+                          ? unit_label
+                          : "units";
+
+  double median_ns = (double)stats->median_ns;
+  double mean_ns = stats->mean_ns;
+  double median_per_sec = median_ns > 0.0 ? (work_units * 1e9) / median_ns : 0.0;
+  double mean_per_sec = mean_ns > 0.0 ? (work_units * 1e9) / mean_ns : 0.0;
+
+  fprintf(simple_bench_stream(),
+          "B| %s | n=%d warmup=%d | wall median=%s mean=%s | work=%.3f %s | "
+          "throughput median=%.3f %s/s mean=%.3f %s/s\n",
+          fcall, stats->runs, stats->warmup, med_buf, mean_buf, work_units,
+          label, median_per_sec, label, mean_per_sec, label);
+}
+
 static inline void write_csv_escaped(FILE* file, const char* value) {
   const char* cursor = value == NULL ? "" : value;
   fputc('"', file);
@@ -317,6 +363,47 @@ static inline void write_csv_escaped(FILE* file, const char* value) {
       fputc('"', file);
     }
     fputc(*cursor, file);
+    ++cursor;
+  }
+  fputc('"', file);
+}
+
+static inline void write_json_escaped(FILE* file, const char* value) {
+  const unsigned char* cursor =
+      (const unsigned char*)(value == NULL ? "" : value);
+  fputc('"', file);
+  while (*cursor != '\0') {
+    unsigned char c = *cursor;
+    switch (c) {
+      case '"':
+        fputs("\\\"", file);
+        break;
+      case '\\':
+        fputs("\\\\", file);
+        break;
+      case '\b':
+        fputs("\\b", file);
+        break;
+      case '\f':
+        fputs("\\f", file);
+        break;
+      case '\n':
+        fputs("\\n", file);
+        break;
+      case '\r':
+        fputs("\\r", file);
+        break;
+      case '\t':
+        fputs("\\t", file);
+        break;
+      default:
+        if (c < 0x20) {
+          fprintf(file, "\\u%04x", (unsigned int)c);
+        } else {
+          fputc((int)c, file);
+        }
+        break;
+    }
     ++cursor;
   }
   fputc('"', file);
@@ -390,6 +477,50 @@ static inline int write_benchmark_csv_row(const char* filename,
     return -1;
   }
   simple_bench_csv_append_row(file, function_name, file_name, line, comment, m);
+  fclose(file);
+  return 0;
+}
+
+// Appends one JSON object per line (JSONL/NDJSON).
+static inline int write_benchmark_json_row(const char* filename,
+                                           const char* function_name,
+                                           const char* file_name, int line,
+                                           const char* comment,
+                                           const simple_bench_measurement* m) {
+  FILE* file = fopen(filename, "a");
+  if (file == NULL) {
+    fprintf(stderr, "simple_bench: fopen(%s) failed: %s\n", filename,
+            strerror(errno));
+    return -1;
+  }
+
+  time_t now = time(NULL);
+  struct tm local_time_value;
+  struct tm* local_time = localtime_r(&now, &local_time_value);
+  char timestamp[32];
+  if (local_time == NULL ||
+      strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S",
+               local_time) == 0) {
+    snprintf(timestamp, sizeof(timestamp), "unknown");
+  }
+
+  fputc('{', file);
+  fputs("\"function\":", file);
+  write_json_escaped(file, function_name);
+  fprintf(file,
+          ",\"wall_time_ns\":%lld,\"user_time_ns\":%lld,\"system_time_ns\":"
+          "%lld,\"peak_rss_delta\":%ld,",
+          m->wall_time_ns, m->user_time_ns, m->system_time_ns,
+          m->peak_rss_delta);
+  fputs("\"file\":", file);
+  write_json_escaped(file, file_name);
+  fprintf(file, ",\"line\":%d,", line);
+  fputs("\"timestamp\":", file);
+  write_json_escaped(file, timestamp);
+  fputs(",\"comment\":", file);
+  write_json_escaped(file, comment);
+  fputs("}\n", file);
+
   fclose(file);
   return 0;
 }
@@ -524,6 +655,126 @@ static inline void print_environment_info(void) {
     print_benchmark_result_verbose(&sb_result, #FCALL, __FILE__, __LINE__);  \
   } while (0)
 
+// Raw measurement variant: performs one full measurement but does not print.
+// OUT_PTR must point to a valid simple_bench_measurement.
+#define BENCH_RAW(FCALL, OUT_PTR)                                             \
+  do {                                                                       \
+    simple_bench_measurement* sb_out = (OUT_PTR);                            \
+    if (sb_out == NULL) {                                                    \
+      fprintf(stderr, "BENCH_RAW: OUT_PTR must not be NULL\n");             \
+      break;                                                                 \
+    }                                                                        \
+    CPUTIME_RSS_USR_SYS(FCALL, &sb_out->wall_time_ns, &sb_out->peak_rss_delta, \
+                        &sb_out->user_time_ns, &sb_out->system_time_ns);     \
+  } while (0)
+
+// Wall-time-only raw measurement variant. OUT_NS_PTR must point to a valid
+// long long destination.
+#define BENCH_RAW_WALL(FCALL, OUT_NS_PTR)                                     \
+  do {                                                                       \
+    long long* sb_out_ns = (OUT_NS_PTR);                                     \
+    if (sb_out_ns == NULL) {                                                 \
+      fprintf(stderr, "BENCH_RAW_WALL: OUT_NS_PTR must not be NULL\n");     \
+      break;                                                                 \
+    }                                                                        \
+    *sb_out_ns = CPUTIME(FCALL);                                             \
+  } while (0)
+
+// Compare two call sites under identical loop conditions.
+// Reports wall-time stats (median/mean) for both and a median-based speedup.
+#define BENCH_COMPARE(NAME_A, FCALL_A, NAME_B, FCALL_B, RUNS, WARMUP)       \
+  do {                                                                       \
+    int sb_runs = (RUNS);                                                    \
+    int sb_warmup = (WARMUP);                                                \
+    if (sb_runs <= 0) {                                                      \
+      fprintf(stderr, "BENCH_COMPARE: RUNS must be > 0\n");                 \
+      break;                                                                 \
+    }                                                                        \
+    if (sb_warmup < 0) {                                                     \
+      fprintf(stderr, "BENCH_COMPARE: WARMUP must be >= 0\n");              \
+      break;                                                                 \
+    }                                                                        \
+    for (int sb_i = 0; sb_i < sb_warmup; ++sb_i) {                           \
+      FCALL_A;                                                               \
+      FCALL_B;                                                               \
+    }                                                                        \
+    long long* sb_samples_a =                                                \
+        (long long*)malloc((size_t)sb_runs * sizeof(long long));             \
+    long long* sb_samples_b =                                                \
+        (long long*)malloc((size_t)sb_runs * sizeof(long long));             \
+    if (sb_samples_a == NULL || sb_samples_b == NULL) {                      \
+      fprintf(stderr, "BENCH_COMPARE: malloc failed for %d samples\n",      \
+              sb_runs);                                                      \
+      free(sb_samples_a);                                                    \
+      free(sb_samples_b);                                                    \
+      break;                                                                 \
+    }                                                                        \
+    for (int sb_i = 0; sb_i < sb_runs; ++sb_i) {                             \
+      simple_bench_measurement sb_ma;                                        \
+      simple_bench_measurement sb_mb;                                        \
+      if ((sb_i & 1) == 0) {                                                 \
+        BENCH_RAW(FCALL_A, &sb_ma);                                          \
+        BENCH_RAW(FCALL_B, &sb_mb);                                          \
+      } else {                                                               \
+        BENCH_RAW(FCALL_B, &sb_mb);                                          \
+        BENCH_RAW(FCALL_A, &sb_ma);                                          \
+      }                                                                      \
+      sb_samples_a[sb_i] = sb_ma.wall_time_ns;                               \
+      sb_samples_b[sb_i] = sb_mb.wall_time_ns;                               \
+    }                                                                        \
+    simple_bench_stats sb_stats_a;                                           \
+    simple_bench_stats sb_stats_b;                                           \
+    simple_bench_compute_stats(sb_samples_a, sb_runs, sb_warmup,             \
+                               &sb_stats_a);                                 \
+    simple_bench_compute_stats(sb_samples_b, sb_runs, sb_warmup,             \
+                               &sb_stats_b);                                 \
+    print_benchmark_compare_summary((NAME_A), &sb_stats_a, (NAME_B),         \
+                                    &sb_stats_b, sb_warmup);                 \
+    free(sb_samples_a);                                                      \
+    free(sb_samples_b);                                                      \
+  } while (0)
+
+// Throughput benchmark for a call that processes a known amount of work.
+// WORK_UNITS can be bytes, elements, requests, etc., described by UNIT_LABEL.
+#define BENCH_THROUGHPUT(FCALL, WORK_UNITS, UNIT_LABEL, RUNS, WARMUP)       \
+  do {                                                                       \
+    int sb_runs = (RUNS);                                                    \
+    int sb_warmup = (WARMUP);                                                \
+    double sb_work_units = (double)(WORK_UNITS);                             \
+    if (sb_runs <= 0) {                                                      \
+      fprintf(stderr, "BENCH_THROUGHPUT: RUNS must be > 0\n");              \
+      break;                                                                 \
+    }                                                                        \
+    if (sb_warmup < 0) {                                                     \
+      fprintf(stderr, "BENCH_THROUGHPUT: WARMUP must be >= 0\n");           \
+      break;                                                                 \
+    }                                                                        \
+    if (sb_work_units <= 0.0) {                                              \
+      fprintf(stderr, "BENCH_THROUGHPUT: WORK_UNITS must be > 0\n");        \
+      break;                                                                 \
+    }                                                                        \
+    for (int sb_i = 0; sb_i < sb_warmup; ++sb_i) {                           \
+      FCALL;                                                                 \
+    }                                                                        \
+    long long* sb_samples =                                                  \
+        (long long*)malloc((size_t)sb_runs * sizeof(long long));             \
+    if (sb_samples == NULL) {                                                \
+      fprintf(stderr, "BENCH_THROUGHPUT: malloc failed for %d samples\n",   \
+              sb_runs);                                                      \
+      break;                                                                 \
+    }                                                                        \
+    for (int sb_i = 0; sb_i < sb_runs; ++sb_i) {                             \
+      long long sb_wall_ns = -1;                                             \
+      BENCH_RAW_WALL(FCALL, &sb_wall_ns);                                    \
+      sb_samples[sb_i] = sb_wall_ns;                                         \
+    }                                                                        \
+    simple_bench_stats sb_stats;                                             \
+    simple_bench_compute_stats(sb_samples, sb_runs, sb_warmup, &sb_stats);   \
+    print_benchmark_throughput_summary(#FCALL, &sb_stats, sb_work_units,     \
+                                       (UNIT_LABEL));                        \
+    free(sb_samples);                                                        \
+  } while (0)
+
 #define BENCH_N(FCALL, RUNS, WARMUP)                                         \
   do {                                                                       \
     int sb_runs = (RUNS);                                                    \
@@ -566,6 +817,16 @@ static inline void print_environment_info(void) {
                         &sb_result.user_time_ns, &sb_result.system_time_ns); \
     write_benchmark_csv_row((FILE_NAME), #FCALL, __FILE__, __LINE__,         \
                             (COMMENT), &sb_result);                          \
+  } while (0)
+
+// Machine-readable JSONL output (one JSON object per line).
+#define BENCH_JSON(FCALL, FILE_NAME, COMMENT)                                 \
+  do {                                                                       \
+    simple_bench_measurement sb_result;                                      \
+    CPUTIME_RSS_USR_SYS(FCALL, &sb_result.wall_time_ns, &sb_result.peak_rss_delta, \
+                        &sb_result.user_time_ns, &sb_result.system_time_ns); \
+    write_benchmark_json_row((FILE_NAME), #FCALL, __FILE__, __LINE__,        \
+                             (COMMENT), &sb_result);                         \
   } while (0)
 
 // Batched CSV variant: opens FILE_NAME exactly once, runs FCALL RUNS times
